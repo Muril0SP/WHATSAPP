@@ -74,3 +74,24 @@ Conectar com `auth: { tenantId }` (id do tenant do usuário logado). Eventos: `q
 - Um número WhatsApp por tenant (conta).
 - Sessão persistida por tenant; reconexão automática com backoff em caso de queda.
 - Em produção: defina `JWT_SECRET` forte e use HTTPS.
+
+## Roadmap
+
+### Fase 1 ✅
+- Auth (registro/login JWT), multi-tenant
+- Conexão por QR Code, reconexão automática
+- WebSocket (qr, ready, disconnected, auth_failure)
+
+### Fase 2 ✅
+- Lista de chats, mensagens, envio texto e mídia
+- Checks (enviado/entregue/lido), fotos de perfil
+- Página de configurações: conexão, perfil WhatsApp, criação de usuários
+- Histórico do banco quando desconectado
+
+### Fase 3 (planejada)
+1. **Gestão de usuários** — editar usuário (nome, email), remover usuário, trocar senha (própria ou por admin)
+2. **Login com empresa** — campo "Empresa/conta" no login quando mesmo email existe em múltiplos tenants
+3. **Recuperação de senha** — fluxo "Esqueci minha senha" por e-mail
+4. **Notificação/som** — alerta ou som quando chega mensagem (especialmente com aba em background)
+5. **Busca** — buscar conversas por nome/número; buscar dentro das mensagens
+6. **Produção** — rate limit nas rotas, documentação de deploy (Coolify)
