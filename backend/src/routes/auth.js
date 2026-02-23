@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { prisma } from '../db.js';
 import { config } from '../config/index.js';
+import { sendPasswordResetEmail } from '../services/email.js';
 
 const router = Router();
 
@@ -56,14 +58,27 @@ router.post('/login', async (req, res) => {
     if (!email || !password) {
       return res.status(400).json({ error: 'Email e senha são obrigatórios' });
     }
-    const where = { email };
+    const emailNorm = email.trim().toLowerCase();
+    const usersWithEmail = await prisma.user.findMany({
+      where: { email: emailNorm },
+      include: { tenant: { select: { id: true, slug: true, name: true } } },
+    });
+    if (usersWithEmail.length === 0) return res.status(401).json({ error: 'Credenciais inválidas' });
+    if (usersWithEmail.length > 1 && !tenantSlug) {
+      return res.status(400).json({
+        error: 'Este e-mail está em múltiplas empresas. Informe o slug da empresa.',
+        tenants: usersWithEmail.map((u) => ({ slug: u.tenant.slug, name: u.tenant.name })),
+      });
+    }
+    let user;
     if (tenantSlug) {
       const tenant = await prisma.tenant.findUnique({ where: { slug: tenantSlug } });
       if (!tenant) return res.status(401).json({ error: 'Credenciais inválidas' });
-      where.tenantId = tenant.id;
+      user = usersWithEmail.find((u) => u.tenantId === tenant.id);
+      if (!user) return res.status(401).json({ error: 'Credenciais inválidas' });
+    } else {
+      user = usersWithEmail[0];
     }
-    const user = await prisma.user.findFirst({ where, include: { tenant: true } });
-    if (!user) return res.status(401).json({ error: 'Credenciais inválidas' });
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) return res.status(401).json({ error: 'Credenciais inválidas' });
     const token = jwt.sign(
@@ -77,6 +92,89 @@ router.post('/login', async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Erro ao fazer login' });
+  }
+});
+
+router.get('/tenants', async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) {
+      return res.status(400).json({ error: 'Email é obrigatório' });
+    }
+    const users = await prisma.user.findMany({
+      where: { email: email.trim().toLowerCase() },
+      include: { tenant: { select: { slug: true, name: true } } },
+    });
+    const tenants = users.map((u) => ({ slug: u.tenant.slug, name: u.tenant.name }));
+    res.json({ tenants });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Erro ao buscar empresas' });
+  }
+});
+
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email, tenantSlug } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'Email é obrigatório' });
+    }
+    const emailNorm = email.trim().toLowerCase();
+    let tenant = null;
+    if (tenantSlug) {
+      tenant = await prisma.tenant.findUnique({ where: { slug: tenantSlug } });
+    }
+    const users = await prisma.user.findMany({
+      where: { email: emailNorm, ...(tenant && { tenantId: tenant.id }) },
+      include: { tenant: true },
+    });
+    if (users.length === 0) {
+      return res.json({ message: 'Se o e-mail existir, você receberá instruções.' });
+    }
+    if (users.length > 1 && !tenant) {
+      return res.status(400).json({
+        error: 'Este e-mail está em múltiplas empresas. Informe o slug da empresa.',
+        tenants: users.map((u) => ({ slug: u.tenant.slug, name: u.tenant.name })),
+      });
+    }
+    const user = users[0];
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+    await prisma.passwordReset.create({
+      data: { email: emailNorm, token, tenantId: user.tenantId, expiresAt },
+    });
+    const resetLink = `${config.appUrl}/redefinir-senha?token=${token}`;
+    await sendPasswordResetEmail(user.email, resetLink, user.tenant?.name);
+    res.json({ message: 'Se o e-mail existir, você receberá instruções.' });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Erro ao enviar e-mail' });
+  }
+});
+
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+    if (!token || !newPassword) {
+      return res.status(400).json({ error: 'Token e nova senha são obrigatórios' });
+    }
+    const reset = await prisma.passwordReset.findUnique({
+      where: { token },
+      include: { tenant: true },
+    });
+    if (!reset || reset.usedAt || reset.expiresAt < new Date()) {
+      return res.status(400).json({ error: 'Link inválido ou expirado' });
+    }
+    const user = await prisma.user.findFirst({
+      where: { email: reset.email, tenantId: reset.tenantId },
+    });
+    if (!user) return res.status(400).json({ error: 'Usuário não encontrado' });
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: user.id }, data: { password: hashed } }),
+      prisma.passwordReset.update({ where: { id: reset.id }, data: { usedAt: new Date() } }),
+    ]);
+    res.json({ success: true, message: 'Senha alterada com sucesso' });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Erro ao redefinir senha' });
   }
 });
 

@@ -18,10 +18,18 @@ export async function api(path, options = {}) {
 }
 
 export async function login(email, password, tenantSlug) {
-  return api('/auth/login', {
+  const res = await fetch(`${API_BASE}/auth/login`, {
     method: 'POST',
-    body: JSON.stringify({ email, password, tenantSlug }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, tenantSlug: tenantSlug || undefined }),
   });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || res.statusText);
+    err.tenants = data.tenants;
+    throw err;
+  }
+  return data;
 }
 
 export async function register(email, password, name, tenantName) {
@@ -81,6 +89,53 @@ export async function createUser(email, password, name) {
   return api('/users', {
     method: 'POST',
     body: JSON.stringify({ email, password, name }),
+  });
+}
+
+export async function updateUser(id, data) {
+  return api(`/users/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteUser(id) {
+  return api(`/users/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function changeMyPassword(currentPassword, newPassword) {
+  return api('/users/me/password', {
+    method: 'PATCH',
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+}
+
+export async function getTenantsByEmail(email) {
+  const data = await api(`/auth/tenants?email=${encodeURIComponent(email)}`);
+  return data.tenants || [];
+}
+
+export async function forgotPassword(email, tenantSlug) {
+  const res = await fetch(`${API_BASE}/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, tenantSlug: tenantSlug || undefined }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || res.statusText);
+    err.tenants = data.tenants;
+    throw err;
+  }
+  return data;
+}
+
+export async function resetPassword(token, newPassword) {
+  return api('/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ token, newPassword }),
   });
 }
 

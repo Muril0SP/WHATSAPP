@@ -13,6 +13,9 @@ import {
   getProfilePicUrl,
   getUsers,
   createUser,
+  updateUser,
+  deleteUser,
+  changeMyPassword,
 } from '../api';
 import './Settings.css';
 
@@ -37,6 +40,14 @@ export default function Settings() {
   const [newUserName, setNewUserName] = useState('');
   const [userCreating, setUserCreating] = useState(false);
   const [message, setMessage] = useState(null);
+  const [editingUser, setEditingUser] = useState(null);
+  const [editName, setEditName] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [currentUserId, setCurrentUserId] = useState(null);
+  const [myPasswordCurrent, setMyPasswordCurrent] = useState('');
+  const [myPasswordNew, setMyPasswordNew] = useState('');
+  const [myPasswordConfirm, setMyPasswordConfirm] = useState('');
+  const [passwordChanging, setPasswordChanging] = useState(false);
 
   function refreshStatus() {
     getWaStatus()
@@ -84,6 +95,16 @@ export default function Settings() {
         .catch(() => setWaProfile(null));
     }
   }, [status, tab]);
+
+  useEffect(() => {
+    const u = localStorage.getItem('user');
+    if (u) {
+      try {
+        const parsed = JSON.parse(u);
+        setCurrentUserId(parsed?.id || null);
+      } catch (_) {}
+    }
+  }, []);
 
   useEffect(() => {
     if (tab === 'users') {
@@ -169,6 +190,63 @@ export default function Settings() {
       })
       .catch((e) => showMsg(e.message, true))
       .finally(() => setUserCreating(false));
+  }
+
+  function handleEditUser(u) {
+    setEditingUser(u);
+    setEditName(u.name || '');
+    setEditEmail(u.email || '');
+  }
+
+  function handleSaveEdit(e) {
+    e.preventDefault();
+    if (!editingUser) return;
+    const name = editName.trim();
+    const email = editEmail.trim().toLowerCase();
+    if (!email) {
+      showMsg('Email é obrigatório', true);
+      return;
+    }
+    updateUser(editingUser.id, { name: name || null, email })
+      .then((data) => {
+        setUsers((prev) => prev.map((u) => (u.id === editingUser.id ? data.user : u)));
+        setEditingUser(null);
+        showMsg('Usuário atualizado');
+      })
+      .catch((e) => showMsg(e.message, true));
+  }
+
+  function handleDeleteUser(u) {
+    if (!window.confirm(`Remover ${u.email}?`)) return;
+    deleteUser(u.id)
+      .then(() => {
+        setUsers((prev) => prev.filter((x) => x.id !== u.id));
+        setEditingUser(null);
+        showMsg('Usuário removido');
+      })
+      .catch((e) => showMsg(e.message, true));
+  }
+
+  function handleChangePassword(e) {
+    e.preventDefault();
+    if (myPasswordNew !== myPasswordConfirm) {
+      showMsg('As senhas não coincidem', true);
+      return;
+    }
+    if (myPasswordNew.length < 6) {
+      showMsg('Senha deve ter pelo menos 6 caracteres', true);
+      return;
+    }
+    setPasswordChanging(true);
+    changeMyPassword(myPasswordCurrent, myPasswordNew)
+      .then(() => {
+        setMyPasswordCurrent('');
+        setMyPasswordNew('');
+        setMyPasswordConfirm('');
+        showMsg('Senha alterada com sucesso');
+      })
+      .catch((e) => showMsg(e.message, true))
+      .finally(() => setPasswordChanging(false));
   }
 
   return (
@@ -294,14 +372,91 @@ export default function Settings() {
           <section className="settings-card settings-card-wide">
             <h2>Usuários da plataforma</h2>
             <p className="settings-hint">Usuários que podem acessar esta conta (tenant).</p>
+
+            {currentUserId && (
+              <div className="password-change-section">
+                <h3>Trocar minha senha</h3>
+                <form onSubmit={handleChangePassword} className="users-form">
+                  <input
+                    type="password"
+                    placeholder="Senha atual"
+                    value={myPasswordCurrent}
+                    onChange={(e) => setMyPasswordCurrent(e.target.value)}
+                    required
+                  />
+                  <input
+                    type="password"
+                    placeholder="Nova senha"
+                    value={myPasswordNew}
+                    onChange={(e) => setMyPasswordNew(e.target.value)}
+                    required
+                    minLength={6}
+                  />
+                  <input
+                    type="password"
+                    placeholder="Confirmar nova senha"
+                    value={myPasswordConfirm}
+                    onChange={(e) => setMyPasswordConfirm(e.target.value)}
+                    required
+                    minLength={6}
+                  />
+                  <button type="submit" className="btn-primary" disabled={passwordChanging}>
+                    {passwordChanging ? 'Alterando...' : 'Alterar senha'}
+                  </button>
+                </form>
+              </div>
+            )}
+
             <ul className="users-list">
               {users.map((u) => (
-                <li key={u.id}>
-                  <span className="user-email">{u.email}</span>
-                  {u.name && <span className="user-name">{u.name}</span>}
+                <li key={u.id} className="users-list-item">
+                  <div className="user-info">
+                    <span className="user-email">{u.email}</span>
+                    {u.name && <span className="user-name">{u.name}</span>}
+                  </div>
+                  <div className="user-actions">
+                    <button type="button" className="btn-icon" onClick={() => handleEditUser(u)} title="Editar">
+                      ✏️
+                    </button>
+                    {u.id !== currentUserId && (
+                      <button type="button" className="btn-icon btn-danger" onClick={() => handleDeleteUser(u)} title="Remover">
+                        🗑️
+                      </button>
+                    )}
+                  </div>
                 </li>
               ))}
             </ul>
+
+            {editingUser && (
+              <div className="modal-overlay" onClick={() => setEditingUser(null)}>
+                <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                  <h3>Editar usuário</h3>
+                  <form onSubmit={handleSaveEdit}>
+                    <input
+                      type="email"
+                      placeholder="Email"
+                      value={editEmail}
+                      onChange={(e) => setEditEmail(e.target.value)}
+                      required
+                    />
+                    <input
+                      type="text"
+                      placeholder="Nome (opcional)"
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                    />
+                    <div className="modal-actions">
+                      <button type="button" className="btn-secondary" onClick={() => setEditingUser(null)}>
+                        Cancelar
+                      </button>
+                      <button type="submit" className="btn-primary">Salvar</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+
             <form className="users-form" onSubmit={handleCreateUser}>
               <h3>Novo usuário</h3>
               <input
