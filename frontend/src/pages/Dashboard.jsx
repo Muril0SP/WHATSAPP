@@ -428,8 +428,8 @@ export default function Dashboard() {
                           })}
                         </span>
                         {msg.fromMe && (
-                          <span className="bubble-ack" title={(msg.ack ?? 0) >= 3 ? 'Lido' : (msg.ack ?? 0) >= 1 ? 'Enviado' : 'Enviando'}>
-                            {(msg.ack ?? 0) >= 3 ? (
+                          <span className={`bubble-ack ${(msg.ack ?? 0) >= 3 ? 'ack-read' : ''}`} title={(msg.ack ?? 0) >= 3 ? 'Lido' : (msg.ack ?? 0) >= 2 ? 'Entregue' : (msg.ack ?? 0) >= 1 ? 'Enviado' : 'Enviando'}>
+                            {(msg.ack ?? 0) >= 2 ? (
                               <span className="ack-double">
                                 <svg width="12" height="8" viewBox="0 0 12 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 4l3 3 7-7"/></svg>
                                 <svg width="12" height="8" viewBox="0 0 12 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 4l3 3 7-7"/></svg>

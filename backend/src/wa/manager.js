@@ -82,7 +82,7 @@ function createClient(tenantId, onQr, onReady, onDisconnected, onAuthFailure, on
 
   client.on('message', async (msg) => {
     try {
-      const chatId = msg.from;
+      const chatId = msg.fromMe ? (msg.to || msg.from) : msg.from;
       const id = msg.id._serialized || msg.id?.id || String(Date.now());
       const fromMe = !!msg.fromMe;
       const body = msg.body || '';
@@ -148,8 +148,9 @@ function createClient(tenantId, onQr, onReady, onDisconnected, onAuthFailure, on
     try {
       const id = msg.id._serialized || msg.id?.id;
       if (!id) return;
-      const chatId = msg.fromMe ? msg.to : msg.from;
-      onMessageAck?.(tenantId, { messageId: id, chatId, ack: ack ?? 0 });
+      const chatId = msg.fromMe ? (msg.to || msg.from) : msg.from;
+      if (!chatId) return;
+      onMessageAck?.(tenantId, { messageId: String(id), chatId: String(chatId), ack: ack ?? 0 });
     } catch (e) {
       console.error('[wa manager] message_ack error:', e);
     }

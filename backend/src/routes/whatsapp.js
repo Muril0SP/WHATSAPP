@@ -178,7 +178,7 @@ router.post('/profile-picture', upload.single('file'), async (req, res) => {
 
 function normalizeMessage(msg) {
   const id = msg.id?._serialized || msg.id?.id || '';
-  const chatId = msg.from || msg.to;
+  const chatId = msg.fromMe ? (msg.to || msg.from) : (msg.from || msg.to);
   const fromMe = !!msg.fromMe;
   const body = msg.body || '';
   const type = msg.type || 'chat';

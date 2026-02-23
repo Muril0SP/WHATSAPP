@@ -452,6 +452,9 @@
 .bubble-ack .ack-double svg:last-child {
   margin-left: -5px;
 }
+.bubble-ack.ack-read {
+  color: #53bdeb;
+}
 .chat-bubble.from-them .bubble-footer {
   justify-content: flex-start;
 }
