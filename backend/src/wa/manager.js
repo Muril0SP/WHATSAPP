@@ -114,6 +114,7 @@ function createClient(tenantId, onQr, onReady, onDisconnected, onAuthFailure, on
           }
         } catch (e) {
           payload.mediaError = e.message;
+          console.warn('[wa manager] download media failed:', payload.id, payload.type, e.message);
         }
       }
 

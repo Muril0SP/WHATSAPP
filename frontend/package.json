@@ -9,11 +9,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "opus-media-recorder": "^0.8.0",
+    "qrcode.react": "^4.1.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.28.0",
-    "socket.io-client": "^4.7.5",
-    "qrcode.react": "^4.1.0"
+    "socket.io-client": "^4.7.5"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.3",

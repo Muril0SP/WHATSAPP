@@ -10,7 +10,7 @@ import {
   destroyClient,
 } from '../wa/manager.js';
 import { getSocketIO } from '../websocket/socket.js';
-import { getMediaPath } from '../storage/index.js';
+import { getMediaPath, saveMedia } from '../storage/index.js';
 import { config } from '../config/index.js';
 import { prisma } from '../db.js';
 
@@ -276,24 +276,51 @@ router.get('/chats/:chatId/messages', async (req, res) => {
     try {
       const chat = await client.getChatById(chatId);
       const messages = await chat.fetchMessages({ limit: 50 });
-      const list = messages.map((msg) => normalizeMessage(msg));
-      for (const msg of list) {
-        try {
-          await prisma.message.upsert({
-            where: { tenantId_waMessageId: { tenantId, waMessageId: msg.id } },
-            create: {
-              tenantId,
-              chatId: msg.chatId,
-              waMessageId: msg.id,
-              fromMe: msg.fromMe,
-              body: msg.body || null,
-              type: msg.type || 'chat',
-              mediaPath: null,
-              timestamp: new Date(msg.timestamp),
-            },
-            update: {},
+      const list = [];
+      for (const msg of messages) {
+        const norm = normalizeMessage(msg);
+        if (norm.hasMedia) {
+          const existing = await prisma.message.findUnique({
+            where: { tenantId_waMessageId: { tenantId, waMessageId: norm.id } },
+            select: { mediaPath: true },
           });
-        } catch (_) {}
+          if (existing?.mediaPath) {
+            norm.mediaPath = existing.mediaPath;
+          } else {
+            try {
+              const media = await msg.downloadMedia();
+              if (media?.data) {
+                const buffer = Buffer.from(media.data, 'base64');
+                const filename = media.filename || `media.${(media.mimetype || '').split('/')[1] || 'bin'}`;
+                const relativePath = saveMedia(
+                  tenantId,
+                  norm.id.replace(/[^a-zA-Z0-9.-]/g, '_'),
+                  buffer,
+                  media.mimetype || '',
+                  filename
+                );
+                norm.mediaPath = relativePath;
+                await prisma.message.upsert({
+                  where: { tenantId_waMessageId: { tenantId, waMessageId: norm.id } },
+                  create: {
+                    tenantId,
+                    chatId: norm.chatId,
+                    waMessageId: norm.id,
+                    fromMe: norm.fromMe,
+                    body: norm.body || null,
+                    type: norm.type || 'chat',
+                    mediaPath: relativePath,
+                    timestamp: new Date(norm.timestamp),
+                  },
+                  update: { mediaPath: relativePath },
+                });
+              }
+            } catch (e) {
+              console.warn('[whatsapp] download media for message failed:', norm.id, norm.type, e.message);
+            }
+          }
+        }
+        list.push(norm);
       }
       return res.json({ messages: list });
     } catch (e) {

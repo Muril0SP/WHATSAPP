@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate, Link, useLocation } from 'react-router-dom';
 import { QRCodeSVG } from 'qrcode.react';
 import { io } from 'socket.io-client';
+import OpusMediaRecorder from 'opus-media-recorder';
 import {
   getWaStatus,
   getWaQr,
@@ -30,9 +31,16 @@ export default function Dashboard() {
   const [fileInputKey, setFileInputKey] = useState(0);
   const [newChatNumber, setNewChatNumber] = useState('');
   const [showNewChat, setShowNewChat] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState([]);
+  const [pendingCaption, setPendingCaption] = useState('');
+  const [recordingAudio, setRecordingAudio] = useState(false);
   const messagesEndRef = useRef(null);
   const socketRef = useRef(null);
   const selectedChatIdRef = useRef(selectedChatId);
+  const didAutoConnectRef = useRef(false);
+  const mediaRecorderRef = useRef(null);
+  const recordingChunksRef = useRef([]);
   selectedChatIdRef.current = selectedChatId;
 
   useEffect(() => {
@@ -57,6 +65,18 @@ export default function Dashboard() {
       setQr(null);
     }
   }, [status]);
+
+  // Inicia a conexão com o WhatsApp automaticamente ao abrir a plataforma (uma vez por sessão)
+  useEffect(() => {
+    if (status === 'loading' || !user?.tenant?.id) return;
+    if (!['none', 'disconnected', 'auth_failure'].includes(status)) return;
+    if (didAutoConnectRef.current) return;
+    didAutoConnectRef.current = true;
+    const t = setTimeout(() => {
+      waConnect().then(() => setStatus('initializing')).catch(() => {});
+    }, 800);
+    return () => clearTimeout(t);
+  }, [status, user?.tenant?.id]);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -215,13 +235,154 @@ export default function Dashboard() {
     }
   };
 
+  const sendOneMedia = async (file, caption = '') => {
+    if (!selectedChatId || sending) return;
+    setSending(true);
+    try {
+      await sendMedia(selectedChatId, file, caption);
+      setFileInputKey((k) => k + 1);
+    } catch (err) {
+      console.error(err);
+      throw err;
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (selectedChatId && status === 'connected') setDragOver(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!e.currentTarget.contains(e.relatedTarget)) setDragOver(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    if (!selectedChatId || status !== 'connected' || sending) return;
+    const items = e.dataTransfer?.files;
+    if (!items?.length) return;
+    const files = Array.from(items).filter((f) => f && f.name);
+    if (!files.length) return;
+    const withPreview = files.map((file) => {
+      const preview = file.type.startsWith('image/') ? URL.createObjectURL(file) : null;
+      return { file, preview };
+    });
+    setPendingFiles((prev) => [...prev, ...withPreview]);
+  };
+
+  const removePendingFile = (index) => {
+    setPendingFiles((prev) => {
+      const next = prev.slice();
+      const item = next[index];
+      if (item?.preview) URL.revokeObjectURL(item.preview);
+      next.splice(index, 1);
+      return next;
+    });
+  };
+
+  const clearPendingFiles = () => {
+    pendingFiles.forEach((item) => {
+      if (item.preview) URL.revokeObjectURL(item.preview);
+    });
+    setPendingFiles([]);
+    setPendingCaption('');
+  };
+
+  const handleSendPendingFiles = async () => {
+    if (!selectedChatId || !pendingFiles.length || sending) return;
+    const caption = pendingCaption.trim();
+    let failed = false;
+    for (let i = 0; i < pendingFiles.length; i++) {
+      try {
+        await sendOneMedia(pendingFiles[i].file, i === 0 ? caption : '');
+      } catch (err) {
+        failed = true;
+        const msg = err?.message || String(err);
+        alert(`Falha ao enviar "${pendingFiles[i].file.name}": ${msg}`);
+        break;
+      }
+    }
+    if (!failed) clearPendingFiles();
+  };
+
+  const startRecording = async () => {
+    if (!selectedChatId || status !== 'connected' || sending) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const base = window.location.origin || '';
+      let recorder;
+      let mimeType = 'audio/webm';
+      try {
+        const workerOptions = {
+          encoderWorkerFactory: () => new Worker(`${base}/encoderWorker.umd.js`),
+          OggOpusEncoderWasmPath: `${base}/OggOpusEncoder.wasm`,
+          WebMOpusEncoderWasmPath: `${base}/WebMOpusEncoder.wasm`,
+        };
+        if (OpusMediaRecorder && OpusMediaRecorder.isTypeSupported && OpusMediaRecorder.isTypeSupported('audio/ogg')) {
+          recorder = new OpusMediaRecorder(stream, { mimeType: 'audio/ogg' }, workerOptions);
+          mimeType = 'audio/ogg';
+        } else {
+          throw new Error('Opus não disponível');
+        }
+      } catch (_) {
+        mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
+        recorder = new MediaRecorder(stream);
+      }
+      recordingChunksRef.current = [];
+      const finalMime = mimeType;
+      recorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) recordingChunksRef.current.push(ev.data);
+      };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setTimeout(() => {
+          const chunks = recordingChunksRef.current;
+          const mime = finalMime.split(';')[0];
+          const blob = new Blob(chunks, { type: mime });
+          if (blob.size === 0) {
+            console.warn('Gravação vazia – tente gravar por mais tempo');
+            return;
+          }
+          const ext = mime.includes('ogg') ? 'ogg' : 'webm';
+          const file = new File([blob], `audio.${ext}`, { type: mime });
+          setPendingFiles((prev) => [...prev, { file, preview: null }]);
+        }, 80);
+      };
+      mediaRecorderRef.current = recorder;
+      recorder.start(100);
+      setRecordingAudio(true);
+    } catch (err) {
+      console.error('Erro ao acessar microfone:', err);
+      alert('Não foi possível acessar o microfone. Verifique as permissões do navegador.');
+    }
+  };
+
+  const stopRecording = () => {
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      try {
+        recorder.requestData();
+      } catch (_) {}
+      recorder.stop();
+      mediaRecorderRef.current = null;
+    }
+    setRecordingAudio(false);
+  };
+
   const mediaUrl = (path) => getMediaUrl(path);
 
   const selectedChat = chats.find((c) => c.id === selectedChatId);
 
-  function ChatAvatar({ chatId, name, className }) {
+  function ChatAvatar({ chatId, name, className, connected }) {
     const [imgFailed, setImgFailed] = useState(false);
-    const src = chatId ? getProfilePicUrl(chatId) : '';
+    const src = connected && chatId ? getProfilePicUrl(chatId) : '';
     const showImg = src && !imgFailed;
     return (
       <span className={className}>
@@ -362,15 +523,16 @@ export default function Dashboard() {
                 </button>
               </div>
             )}
-            {chats.length === 0 && !showNewChat && <p className="chat-list-empty">Nenhuma conversa</p>}
-            {chats.map((chat) => (
+            <div className="chat-list-scroll">
+              {chats.length === 0 && !showNewChat && <p className="chat-list-empty">Nenhuma conversa</p>}
+              {chats.map((chat) => (
               <button
                 type="button"
                 key={chat.id}
                 className={`chat-list-item ${selectedChatId === chat.id ? 'selected' : ''}`}
                 onClick={() => setSelectedChatId(chat.id)}
               >
-                <ChatAvatar chatId={chat.id} name={chat.name} className="chat-avatar" />
+                <ChatAvatar chatId={chat.id} name={chat.name} className="chat-avatar" connected={status === 'connected'} />
                 <div className="chat-list-content">
                   <div className="chat-list-row">
                     <span className="chat-list-name">{chat.name || chat.id}</span>
@@ -384,14 +546,20 @@ export default function Dashboard() {
                 </div>
               </button>
             ))}
+            </div>
           </aside>
           <section className="chat-panel">
             {!selectedChatId ? (
               <div className="chat-placeholder">Selecione uma conversa</div>
             ) : (
-              <>
+              <div
+                className={`chat-panel-dropzone ${dragOver ? 'drag-over' : ''}`}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+              >
                 <div className="chat-header">
-                  <ChatAvatar chatId={selectedChatId} name={selectedChat?.name} className="chat-header-avatar" />
+                  <ChatAvatar chatId={selectedChatId} name={selectedChat?.name} className="chat-header-avatar" connected={status === 'connected'} />
                   <div className="chat-header-info">
                     <span className="chat-header-name">{selectedChat?.name || selectedChatId}</span>
                     <span className="chat-header-status">WhatsApp</span>
@@ -410,6 +578,10 @@ export default function Dashboard() {
                         <div className="bubble-media">
                           {msg.type && msg.type.startsWith('image') ? (
                             <img src={mediaUrl(msg.mediaPath)} alt="" />
+                          ) : (msg.type === 'audio' || msg.type === 'ptt' || (msg.type && msg.type.startsWith('audio'))) ? (
+                            <audio controls src={mediaUrl(msg.mediaPath)} />
+                          ) : (msg.type && msg.type.startsWith('video')) ? (
+                            <video controls src={mediaUrl(msg.mediaPath)} />
                           ) : (
                             <a href={mediaUrl(msg.mediaPath)} target="_blank" rel="noreferrer">
                               Baixar mídia
@@ -417,6 +589,16 @@ export default function Dashboard() {
                           )}
                           {msg.body && <p>{msg.body}</p>}
                         </div>
+                      ) : msg.hasMedia && !msg.mediaPath ? (
+                        <p className="bubble-media-unavailable">
+                          {msg.type && msg.type.startsWith('image')
+                            ? '🖼️ Imagem (não disponível)'
+                            : (msg.type === 'audio' || msg.type === 'ptt' || (msg.type && msg.type.startsWith('audio')))
+                              ? '🎵 Áudio (não disponível)'
+                              : (msg.type && msg.type.startsWith('video'))
+                                ? '🎬 Vídeo (não disponível)'
+                                : '📎 Mídia (não disponível)'}
+                        </p>
                       ) : (
                         <p>{msg.body || '(vazio)'}</p>
                       )}
@@ -446,8 +628,49 @@ export default function Dashboard() {
                   ))}
                   <div ref={messagesEndRef} />
                 </div>
+                {pendingFiles.length > 0 && (
+                  <div className="chat-pending-files">
+                    <div className="chat-pending-list">
+                      {pendingFiles.map((item, i) => (
+                        <div key={i} className="chat-pending-item">
+                          {item.preview ? (
+                            <img src={item.preview} alt="" className="chat-pending-thumb" />
+                          ) : item.file.type.startsWith('audio/') ? (
+                            <span className="chat-pending-icon">🎵</span>
+                          ) : (
+                            <span className="chat-pending-icon">📎</span>
+                          )}
+                          <span className="chat-pending-name" title={item.file.name}>{item.file.name}</span>
+                          <button type="button" className="chat-pending-remove" onClick={() => removePendingFile(i)} title="Remover" aria-label="Remover">
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <input
+                      type="text"
+                      className="chat-pending-caption"
+                      placeholder="Legenda (opcional)"
+                      value={pendingCaption}
+                      onChange={(e) => setPendingCaption(e.target.value)}
+                    />
+                    <div className="chat-pending-actions">
+                      <button type="button" className="btn-cancel-pending" onClick={clearPendingFiles}>
+                        Cancelar
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-send-pending"
+                        onClick={handleSendPendingFiles}
+                        disabled={sending}
+                      >
+                        {sending ? 'Enviando...' : `Enviar ${pendingFiles.length} arquivo(s)`}
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <div className={`chat-input-row ${status !== 'connected' ? 'disabled' : ''}`}>
-                  <label className="chat-attach">
+                  <label className="chat-attach" title="Anexar arquivo">
                     <input
                       type="file"
                       key={fileInputKey}
@@ -458,6 +681,19 @@ export default function Dashboard() {
                     />
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
                   </label>
+                  <button
+                    type="button"
+                    className={`chat-mic ${recordingAudio ? 'recording' : ''}`}
+                    title={recordingAudio ? 'Parar gravação' : 'Enviar áudio'}
+                    onClick={recordingAudio ? stopRecording : startRecording}
+                    disabled={status !== 'connected' || sending}
+                  >
+                    {recordingAudio ? (
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                    ) : (
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+                    )}
+                  </button>
                   <input
                     type="text"
                     className="chat-input"
@@ -476,7 +712,7 @@ export default function Dashboard() {
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
                   </button>
                 </div>
-              </>
+              </div>
             )}
           </section>
         </div>
