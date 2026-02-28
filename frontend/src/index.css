@@ -185,6 +185,13 @@ body {
   animation: chat-spin 0.8s linear infinite;
   flex-shrink: 0;
 }
+.media-unavailable {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+}
 
 /* ─── Audio Player ─────────────────────────────────────── */
 .audio-player {

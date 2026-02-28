@@ -18,6 +18,19 @@ function emitMediaReady(tenantId, messageId, chatId, mediaPath, mimeType) {
   } catch (_) {}
 }
 
+function emitMediaError(tenantId, messageId, chatId, error) {
+  try {
+    const io = getSocketIO();
+    if (io) {
+      io.to(`tenant:${tenantId}`).emit('media_error', {
+        messageId,
+        chatId,
+        error: error?.message || String(error),
+      });
+    }
+  } catch (_) {}
+}
+
 /**
  * Baixa mídia de uma mensagem em background sem bloquear a thread principal.
  * Emite `media_ready` via Socket.io quando concluído.
@@ -69,6 +82,7 @@ export function downloadMediaBackground(tenantId, msg, msgObject) {
       emitMediaReady(tenantId, msg.id, msg.chatId, relativePath, media.mimetype);
     } catch (e) {
       console.warn('[mediaWorker] download failed:', msg.id, e.message);
+      emitMediaError(tenantId, msg.id, msg.chatId, e);
     } finally {
       activeDownloads.delete(key);
     }

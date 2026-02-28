@@ -171,9 +171,15 @@ function createClient(tenantId, onQr, onReady, onDisconnected, onAuthFailure, on
             body: payload.body || null,
             type: payload.type || 'chat',
             mediaPath: payload.mediaPath || null,
+            mimeType: payload.mimeType || null,
             timestamp: new Date(payload.timestamp),
+            ack: payload.ack ?? 0,
           },
-          update: {},
+          update: {
+            ...(payload.mediaPath != null && { mediaPath: payload.mediaPath }),
+            ...(payload.mimeType != null && { mimeType: payload.mimeType }),
+            ...(payload.ack != null && payload.ack > 0 && { ack: payload.ack }),
+          },
         });
       } catch (dbErr) {
         // ignore duplicate or DB errors
@@ -183,13 +189,20 @@ function createClient(tenantId, onQr, onReady, onDisconnected, onAuthFailure, on
     }
   });
 
-  client.on('message_ack', (msg, ack) => {
+  client.on('message_ack', async (msg, ack) => {
     try {
       const id = msg.id._serialized || msg.id?.id;
       if (!id) return;
       const chatId = msg.fromMe ? (msg.to || msg.from) : msg.from;
       if (!chatId) return;
-      onMessageAck?.(tenantId, { messageId: String(id), chatId: String(chatId), ack: ack ?? 0 });
+      const ackVal = ack ?? 0;
+      onMessageAck?.(tenantId, { messageId: String(id), chatId: String(chatId), ack: ackVal });
+      try {
+        await prisma.message.updateMany({
+          where: { tenantId, waMessageId: String(id) },
+          data: { ack: ackVal },
+        });
+      } catch (_) {}
     } catch (e) {
       console.error('[wa manager] message_ack error:', e);
     }

@@ -68,4 +68,15 @@ export function isRedisConnected() {
   return connected;
 }
 
+export async function redisPing() {
+  try {
+    const c = getClient();
+    if (!c) return false;
+    await c.ping();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export { getClient };

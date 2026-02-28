@@ -5,15 +5,19 @@ import crypto from 'crypto';
 import { prisma } from '../db.js';
 import { config } from '../config/index.js';
 import { sendPasswordResetEmail } from '../services/email.js';
+import {
+  handleValidationErrors,
+  authRegister,
+  authLogin,
+  authForgotPassword,
+  authResetPassword,
+} from '../validators/index.js';
 
 const router = Router();
 
-router.post('/register', async (req, res) => {
+router.post('/register', authRegister, handleValidationErrors, async (req, res) => {
   try {
     const { email, password, name, tenantName } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email e senha são obrigatórios' });
-    }
     const slug = (tenantName || email.split('@')[0])
       .toLowerCase()
       .replace(/\s+/g, '-')
@@ -52,13 +56,10 @@ router.post('/register', async (req, res) => {
   }
 });
 
-router.post('/login', async (req, res) => {
+router.post('/login', authLogin, handleValidationErrors, async (req, res) => {
   try {
     const { email, password, tenantSlug } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email e senha são obrigatórios' });
-    }
-    const emailNorm = email.trim().toLowerCase();
+    const emailNorm = String(email).trim().toLowerCase();
     const usersWithEmail = await prisma.user.findMany({
       where: { email: emailNorm },
       include: { tenant: { select: { id: true, slug: true, name: true } } },
@@ -112,13 +113,10 @@ router.get('/tenants', async (req, res) => {
   }
 });
 
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', authForgotPassword, handleValidationErrors, async (req, res) => {
   try {
     const { email, tenantSlug } = req.body;
-    if (!email) {
-      return res.status(400).json({ error: 'Email é obrigatório' });
-    }
-    const emailNorm = email.trim().toLowerCase();
+    const emailNorm = String(email).trim().toLowerCase();
     let tenant = null;
     if (tenantSlug) {
       tenant = await prisma.tenant.findUnique({ where: { slug: tenantSlug } });
@@ -150,12 +148,9 @@ router.post('/forgot-password', async (req, res) => {
   }
 });
 
-router.post('/reset-password', async (req, res) => {
+router.post('/reset-password', authResetPassword, handleValidationErrors, async (req, res) => {
   try {
     const { token, newPassword } = req.body;
-    if (!token || !newPassword) {
-      return res.status(400).json({ error: 'Token e nova senha são obrigatórios' });
-    }
     const reset = await prisma.passwordReset.findUnique({
       where: { token },
       include: { tenant: true },

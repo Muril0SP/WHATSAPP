@@ -139,8 +139,11 @@ export async function resetPassword(token, newPassword) {
   });
 }
 
-export async function getChats() {
-  const data = await api('/wa/chats');
+export async function getChats(searchQuery = '') {
+  const params = new URLSearchParams();
+  if (searchQuery?.trim()) params.set('q', searchQuery.trim());
+  const query = params.toString() ? `?${params.toString()}` : '';
+  const data = await api(`/wa/chats${query}`);
   return data.chats || [];
 }
 

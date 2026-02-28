@@ -210,9 +210,34 @@ function MediaContent({ msg, mediaUrl }) {
   );
 }
 
-// ─── MediaPending (mídia sendo baixada em background) ─────────────────────────
+// ─── MediaUnavailable ─────────────────────────────────────────────────────────
+
+function MediaUnavailable({ type }) {
+  const label = isImage(type)
+    ? 'Imagem indisponível'
+    : isAudio(type)
+      ? 'Áudio indisponível'
+      : isVideo(type)
+        ? 'Vídeo indisponível'
+        : 'Arquivo indisponível';
+  return (
+    <div className="media-unavailable">
+      <span>{label}</span>
+    </div>
+  );
+}
+
+// ─── MediaPending (mídia sendo baixada em background, timeout 30s) ─────────────
 
 function MediaPending({ type }) {
+  const [timedOut, setTimedOut] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setTimedOut(true), 30000);
+    return () => clearTimeout(t);
+  }, []);
+
+  if (timedOut) return <MediaUnavailable type={type} />;
+
   const label = isImage(type)
     ? 'Baixando imagem...'
     : isAudio(type)
@@ -262,6 +287,7 @@ export default function MessageBubble({ msg, mediaUrl: mediaUrlFn, onReply }) {
   const mediaUrl = mediaUrlFn || getMediaUrl;
   const hasMedia = !!(msg.hasMedia || isMediaType(msg.type));
   const hasPath = !!msg.mediaPath;
+  const mediaError = !!msg.mediaError;
 
   const handleContextMenu = (e) => {
     e.preventDefault();
@@ -283,6 +309,8 @@ export default function MessageBubble({ msg, mediaUrl: mediaUrlFn, onReply }) {
           <div className="bubble-media">
             {hasPath ? (
               <MediaContent msg={msg} mediaUrl={mediaUrl} />
+            ) : mediaError ? (
+              <MediaUnavailable type={msg.type} />
             ) : (
               <MediaPending type={msg.type} />
             )}

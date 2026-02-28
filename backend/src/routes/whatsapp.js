@@ -15,6 +15,7 @@ import { config } from '../config/index.js';
 import { prisma } from '../db.js';
 import { cacheGet, cacheSet, cacheDel } from '../cache/redis.js';
 import { downloadMediaBackground } from '../services/mediaWorker.js';
+import { handleValidationErrors, waSend, waSendMedia } from '../validators/index.js';
 
 const require = createRequire(import.meta.url);
 const { MessageMedia } = require('whatsapp-web.js');
@@ -300,18 +301,19 @@ router.get('/chats', async (req, res) => {
   const client = getClient(req.tenantId);
   const tenantId = req.tenantId;
   const cacheKey = `chats:${tenantId}`;
+  const searchQ = String(req.query.q || '').trim().toLowerCase();
 
   if (client?.info) {
     // Verifica cache Redis primeiro (TTL 30s)
     const cached = await cacheGet(cacheKey);
-    if (cached) return res.json({ chats: cached });
-
-    try {
-      if (client.pupPage) await scrollChatListBriefly(client.pupPage);
-      const chats = await client.getChats();
-      const list = chats
-        .filter((chat) => chat.id?._serialized !== 'status@broadcast')
-        .map((chat) => {
+    let list = cached;
+    if (!list) {
+      try {
+        if (client.pupPage) await scrollChatListBriefly(client.pupPage);
+        const chats = await client.getChats();
+        list = chats
+          .filter((chat) => chat.id?._serialized !== 'status@broadcast')
+          .map((chat) => {
           let lastMessage = null;
           try {
             if (chat.lastMessage) {
@@ -328,18 +330,25 @@ router.get('/chats', async (req, res) => {
             name: chat.name,
             isGroup: chat.isGroup,
             lastMessage,
-          };
-        });
+            };
+          });
 
-      list.sort((a, b) =>
-        (b.lastMessage?.timestamp || '').localeCompare(a.lastMessage?.timestamp || '')
-      );
-
-      await cacheSet(cacheKey, list, 30);
-      return res.json({ chats: list });
-    } catch (e) {
-      return res.status(500).json({ error: e.message || 'Erro ao listar chats' });
+        list.sort((a, b) =>
+          (b.lastMessage?.timestamp || '').localeCompare(a.lastMessage?.timestamp || '')
+        );
+        await cacheSet(cacheKey, list, 30);
+      } catch (e) {
+        return res.status(500).json({ error: e.message || 'Erro ao listar chats' });
+      }
     }
+    if (searchQ) {
+      list = list.filter((c) => {
+        const name = (c.name || '').toLowerCase();
+        const id = (c.id || '').toLowerCase();
+        return name.includes(searchQ) || id.includes(searchQ);
+      });
+    }
+    return res.json({ chats: list });
   }
 
   // Fallback: banco de dados — última mensagem por chat (DISTINCT ON no PostgreSQL)
@@ -362,6 +371,14 @@ router.get('/chats', async (req, res) => {
     list.sort((a, b) =>
       (b.lastMessage?.timestamp || '').localeCompare(a.lastMessage?.timestamp || '')
     );
+    if (searchQ) {
+      const q = searchQ;
+      list = list.filter((c) => {
+        const name = (c.name || '').toLowerCase();
+        const id = (c.id || '').toLowerCase();
+        return name.includes(q) || id.includes(q);
+      });
+    }
     res.json({ chats: list });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Erro ao listar chats' });
@@ -533,15 +550,12 @@ router.get('/chats/:chatId/messages', async (req, res) => {
 
 // ─── POST /send ───────────────────────────────────────────────────────────────
 
-router.post('/send', async (req, res) => {
+router.post('/send', waSend, handleValidationErrors, async (req, res) => {
   const client = getClient(req.tenantId);
   if (!client?.info) {
     return res.status(503).json({ error: 'WhatsApp não conectado' });
   }
   const { chatId, text } = req.body;
-  if (!chatId || !text) {
-    return res.status(400).json({ error: 'chatId e text são obrigatórios' });
-  }
   try {
     const sent = await client.sendMessage(chatId, text);
     const sentId =
@@ -578,7 +592,7 @@ router.post('/send', async (req, res) => {
 
 // ─── POST /send-media ─────────────────────────────────────────────────────────
 
-router.post('/send-media', upload.single('file'), async (req, res) => {
+router.post('/send-media', upload.single('file'), waSendMedia, handleValidationErrors, async (req, res) => {
   const client = getClient(req.tenantId);
   if (!client?.info) {
     return res.status(503).json({ error: 'WhatsApp não conectado' });
@@ -586,8 +600,8 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
   const chatId = req.body.chatId;
   const caption = req.body.caption || '';
   const file = req.file;
-  if (!chatId || !file) {
-    return res.status(400).json({ error: 'chatId e file são obrigatórios' });
+  if (!file) {
+    return res.status(400).json({ error: 'Arquivo é obrigatório' });
   }
   const mime = file.mimetype || 'application/octet-stream';
   if (!isAllowedMime(mime)) {

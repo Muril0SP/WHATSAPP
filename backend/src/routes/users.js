@@ -2,6 +2,13 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { prisma } from '../db.js';
 import { authMiddleware } from '../auth/middleware.js';
+import {
+  handleValidationErrors,
+  usersCreate,
+  usersUpdate,
+  usersChangePassword,
+  usersDelete,
+} from '../validators/index.js';
 
 const router = Router();
 router.use(authMiddleware);
@@ -19,12 +26,9 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', usersCreate, handleValidationErrors, async (req, res) => {
   try {
     const { email, password, name } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email e senha são obrigatórios' });
-    }
     const hashed = await bcrypt.hash(password, 10);
     const user = await prisma.user.create({
       data: {
@@ -44,12 +48,9 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.patch('/me/password', async (req, res) => {
+router.patch('/me/password', usersChangePassword, handleValidationErrors, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ error: 'Senha atual e nova senha são obrigatórias' });
-    }
     const user = await prisma.user.findUnique({ where: { id: req.user.id } });
     if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
     const ok = await bcrypt.compare(currentPassword, user.password);
@@ -65,7 +66,7 @@ router.patch('/me/password', async (req, res) => {
   }
 });
 
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', usersUpdate, handleValidationErrors, async (req, res) => {
   try {
     const { id } = req.params;
     const { name, email } = req.body;
@@ -90,7 +91,7 @@ router.patch('/:id', async (req, res) => {
   }
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', usersDelete, handleValidationErrors, async (req, res) => {
   try {
     const { id } = req.params;
     if (id === req.user.id) {

@@ -64,6 +64,8 @@ export default function ChatPanel({
   loadingMore,
   messagesLoading,
   uploadProgress,
+  messagesError,
+  onRetryLoadMessages,
 }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -187,6 +189,15 @@ export default function ChatPanel({
               <div className="chat-loading-initial">
                 <div className="chat-loading-spinner" />
                 <p>Carregando mensagens...</p>
+              </div>
+            ) : messagesError ? (
+              <div className="chat-messages-error">
+                <p>{messagesError}</p>
+                {onRetryLoadMessages && (
+                  <button type="button" className="btn-retry-messages" onClick={onRetryLoadMessages}>
+                    Tentar novamente
+                  </button>
+                )}
               </div>
             ) : (
               <>
