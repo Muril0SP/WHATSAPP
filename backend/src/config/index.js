@@ -7,7 +7,7 @@ dotenv.config({ path: path.join(__dirname, '../../.env') });
 
 export const config = {
   port: parseInt(process.env.PORT || '3001', 10),
-  databaseUrl: process.env.DATABASE_URL || 'file:./dev.sqlite',
+  databaseUrl: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/whatsapp?schema=public',
   redisUrl: process.env.REDIS_URL || null,
   sessionPath: path.resolve(process.env.SESSION_PATH || '.wwebjs_auth'),
   storagePath: path.resolve(process.env.STORAGE_PATH || 'storage'),

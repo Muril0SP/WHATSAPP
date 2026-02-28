@@ -243,8 +243,32 @@ function normalizeDbMessage(row) {
     hasMedia: !!row.mediaPath || isMediaType(type),
     mediaPath: row.mediaPath || undefined,
     mimeType: row.mimeType || undefined,
-    ack: 0,
+    ack: row.ack ?? 0,
   };
+}
+
+// Timeout helper para evitar fetchMessages travar indefinidamente
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Timeout ao carregar mensagens')), ms)
+    ),
+  ]);
+}
+
+// Tenta getChatById com fallback de formato (@c.us <-> @s.whatsapp.net)
+async function getChatByIdWithFallback(client, chatId) {
+  let chat = await client.getChatById(chatId);
+  if (chat) return chat;
+  if (chatId.includes('@c.us')) {
+    const alt = chatId.replace('@c.us', '@s.whatsapp.net');
+    chat = await client.getChatById(alt);
+  } else if (chatId.includes('@s.whatsapp.net')) {
+    const alt = chatId.replace('@s.whatsapp.net', '@c.us');
+    chat = await client.getChatById(alt);
+  }
+  return chat || null;
 }
 
 // Scroll reduzido: máximo 5 iterações, 200ms cada — apenas para forçar
@@ -318,29 +342,24 @@ router.get('/chats', async (req, res) => {
     }
   }
 
-  // Fallback: banco de dados
+  // Fallback: banco de dados — última mensagem por chat (DISTINCT ON no PostgreSQL)
   try {
-    const messages = await prisma.message.findMany({
-      where: { tenantId },
-      orderBy: { timestamp: 'desc' },
-      take: 500,
-    });
-    const chatMap = new Map();
-    for (const m of messages) {
-      if (m.chatId === 'status@broadcast') continue;
-      if (!chatMap.has(m.chatId)) {
-        chatMap.set(m.chatId, {
-          id: m.chatId,
-          name: m.chatId,
-          isGroup: false,
-          lastMessage: {
-            body: (m.body || '(mídia)').slice(0, 80),
-            timestamp: m.timestamp.toISOString(),
-          },
-        });
-      }
-    }
-    const list = Array.from(chatMap.values()).sort((a, b) =>
+    const messages = await prisma.$queryRaw`
+      SELECT DISTINCT ON ("chatId") "chatId", "body", "timestamp"
+      FROM "Message"
+      WHERE "tenantId" = ${tenantId} AND "chatId" != 'status@broadcast'
+      ORDER BY "chatId", "timestamp" DESC
+    `;
+    const list = messages.map((m) => ({
+      id: m.chatId,
+      name: m.chatId,
+      isGroup: false,
+      lastMessage: {
+        body: (m.body || '(mídia)').slice(0, 80),
+        timestamp: m.timestamp?.toISOString?.() ?? new Date(m.timestamp).toISOString(),
+      },
+    }));
+    list.sort((a, b) =>
       (b.lastMessage?.timestamp || '').localeCompare(a.lastMessage?.timestamp || '')
     );
     res.json({ chats: list });
@@ -377,51 +396,122 @@ router.get('/chats/:chatId/search', async (req, res) => {
 });
 
 // ─── GET /chats/:chatId/messages ─────────────────────────────────────────────
-// IMPORTANTE: Responde imediatamente sem bloquear para download de mídia.
-// O download ocorre em background via mediaWorker e notifica via Socket.io.
+// Estratégia híbrida: banco + fetchMessages. syncHistory antes do fetch.
+
+async function fetchMessagesFromDb(tenantId, chatId, limit, before) {
+  const where = { tenantId, chatId };
+  if (before) where.timestamp = { lt: new Date(before) };
+  const limitPlusOne = limit + 1;
+  const rows = await prisma.message.findMany({
+    where,
+    orderBy: { timestamp: 'desc' },
+    take: limitPlusOne,
+  });
+  const hasMore = rows.length > limit;
+  const list = rows.slice(0, limit).reverse().map((row) => normalizeDbMessage(row));
+  return { messages: list, hasMore };
+}
+
+function mergeMessages(dbMessages, apiMessages) {
+  const byId = new Map();
+  for (const m of dbMessages) byId.set(m.id, { ...m });
+  for (const m of apiMessages) {
+    const existing = byId.get(m.id);
+    byId.set(m.id, existing ? {
+      ...m,
+      mediaPath: m.mediaPath || existing.mediaPath,
+      mimeType: m.mimeType || existing.mimeType,
+      body: m.body || existing.body,
+      ack: Math.max(m.ack ?? 0, existing.ack ?? 0),
+    } : { ...m });
+  }
+  const list = Array.from(byId.values());
+  list.sort((a, b) => {
+    const ta = a.timestampMs ?? new Date(a.timestamp).getTime();
+    const tb = b.timestampMs ?? new Date(b.timestamp).getTime();
+    if (ta !== tb) return ta - tb;
+    return String(a.id).localeCompare(String(b.id));
+  });
+  return list;
+}
 
 router.get('/chats/:chatId/messages', async (req, res) => {
   const client = getClient(req.tenantId);
   const tenantId = req.tenantId;
   const chatId = decodeURIComponent(req.params.chatId || '');
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+  const before = req.query.before;
 
-  if (client?.info) {
+  let dbResult = { messages: [], hasMore: false };
+  try {
+    dbResult = await fetchMessagesFromDb(tenantId, chatId, limit, before);
+  } catch (_) {}
+  const dbMessages = dbResult.messages;
+  const dbHasMore = dbResult.hasMore;
+
+  if (!client?.info) {
+    return res.json({ messages: dbMessages, hasMore: dbHasMore });
+  }
+
+  try {
     try {
-      const chat = await client.getChatById(chatId);
-      if (!chat) return res.json({ messages: [] });
+      const chat = await getChatByIdWithFallback(client, chatId);
+      if (!chat) return res.json({ messages: dbMessages, hasMore: dbHasMore });
 
-      let rawMessages = await chat.fetchMessages({ limit: 50 });
+      try {
+        await chat.syncHistory();
+      } catch (_) {}
+
+      let rawMessages = [];
+      try {
+        rawMessages = await withTimeout(chat.fetchMessages({ limit: 50 }), 8000);
+      } catch (_) {
+        return res.json({ messages: dbMessages, hasMore: dbHasMore });
+      }
       if (!Array.isArray(rawMessages)) rawMessages = [];
 
-      const list = [];
-      const msgObjects = new Map();
-
+      const idsWithMedia = [];
+      const rawProcessed = [];
       for (let idx = 0; idx < rawMessages.length; idx++) {
-        const msg = rawMessages[idx];
+        let msg = rawMessages[idx];
+        if (
+          (!msg.body || msg.body === '') &&
+          (msg.type === 'chat' || !msg.type) &&
+          typeof msg.reload === 'function'
+        ) {
+          try { msg = await msg.reload(); } catch (_) {}
+        }
         const norm = { ...normalizeMessage(msg), _idx: idx };
-        msgObjects.set(norm.id, msg);
-
+        rawProcessed.push({ norm, msg });
         if (norm.hasMedia) {
-          // Verifica se já temos a mídia no banco
-          const existing = await prisma.message.findUnique({
-            where: { tenantId_waMessageId: { tenantId, waMessageId: norm.id } },
-            select: { mediaPath: true, mimeType: true },
-          });
+          idsWithMedia.push(norm.id);
+        }
+      }
 
+      let mediaMap = new Map();
+      if (idsWithMedia.length > 0) {
+        const existingMedia = await prisma.message.findMany({
+          where: { tenantId, waMessageId: { in: idsWithMedia } },
+          select: { waMessageId: true, mediaPath: true, mimeType: true },
+        });
+        mediaMap = new Map(existingMedia.map((r) => [r.waMessageId, r]));
+      }
+
+      const apiList = [];
+      for (const { norm, msg } of rawProcessed) {
+        if (norm.hasMedia) {
+          const existing = mediaMap.get(norm.id);
           if (existing?.mediaPath) {
             norm.mediaPath = existing.mediaPath;
             if (existing.mimeType) norm.mimeType = existing.mimeType;
           } else {
-            // Dispara download em background — não bloqueia a resposta
-            const msgObj = msg;
-            downloadMediaBackground(tenantId, norm, msgObj);
+            downloadMediaBackground(tenantId, norm, msg);
           }
         }
-
-        list.push(norm);
+        apiList.push(norm);
       }
 
-      list.sort((a, b) => {
+      apiList.sort((a, b) => {
         const ta = a.timestampMs ?? new Date(a.timestamp).getTime();
         const tb = b.timestampMs ?? new Date(b.timestamp).getTime();
         if (ta !== tb) return ta - tb;
@@ -430,34 +520,14 @@ router.get('/chats/:chatId/messages', async (req, res) => {
         return (a._idx ?? 0) - (b._idx ?? 0);
       });
 
-      return res.json({ messages: list.map(({ _idx, ...m }) => m) });
+      const cleanApi = apiList.map(({ _idx, ...m }) => m);
+      const merged = mergeMessages(dbMessages, cleanApi);
+      return res.json({ messages: merged, hasMore: dbHasMore });
     } catch (e) {
-      return res.status(500).json({ error: e.message || 'Erro ao carregar mensagens' });
+      return res.json({ messages: dbMessages, hasMore: dbHasMore });
     }
-  }
-
-  // Fallback: banco de dados (offline)
-  try {
-    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
-    const before = req.query.before;
-    const where = { tenantId, chatId };
-    if (before) where.timestamp = { lt: new Date(before) };
-
-    const rows = await prisma.message.findMany({
-      where,
-      orderBy: { timestamp: 'desc' },
-      take: limit,
-    });
-
-    const list = rows.reverse().map((row) => normalizeDbMessage(row));
-    list.sort((a, b) => {
-      const ta = a.timestampMs ?? new Date(a.timestamp).getTime();
-      const tb = b.timestampMs ?? new Date(b.timestamp).getTime();
-      return ta !== tb ? ta - tb : String(a.id).localeCompare(String(b.id));
-    });
-    res.json({ messages: list });
   } catch (e) {
-    res.status(500).json({ error: e.message || 'Erro ao carregar mensagens' });
+    return res.json({ messages: dbMessages, hasMore: dbHasMore });
   }
 });
 

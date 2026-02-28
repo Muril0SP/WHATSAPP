@@ -45,6 +45,7 @@ export default function Dashboard() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [hasMoreMessages, setHasMoreMessages] = useState(true);
+  const [messagesError, setMessagesError] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(null);
   const messagesEndRef = useRef(null);
   const socketRef = useRef(null);
@@ -203,8 +204,17 @@ export default function Dashboard() {
       setMessages((prev) =>
         prev.map((m) =>
           m.id === messageId
-            ? { ...m, mediaPath, mimeType: mimeType || m.mimeType }
+            ? { ...m, mediaPath, mimeType: mimeType || m.mimeType, mediaError: false }
             : m
+        )
+      );
+    });
+
+    socket.on('media_error', ({ messageId, chatId }) => {
+      if (selectedChatIdRef.current !== chatId) return;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId ? { ...m, mediaError: true } : m
         )
       );
     });
@@ -231,15 +241,34 @@ export default function Dashboard() {
       setMessages([]);
       setHasMoreMessages(true);
       setMessagesLoading(false);
+      setMessagesError(null);
       return;
     }
     setHasMoreMessages(true);
     setMessagesLoading(true);
-    getChatMessages(selectedChatId).then((msgs) => {
+    setMessagesError(null);
+    getChatMessages(selectedChatId).then(({ messages: msgs, hasMore }) => {
       setMessages(sortMessages(msgs));
-      setHasMoreMessages(msgs.length >= 50);
-    }).catch(() => setMessages([])).finally(() => setMessagesLoading(false));
+      setHasMoreMessages(hasMore);
+      setMessagesError(null);
+    }).catch((err) => {
+      setMessages([]);
+      setMessagesError(err?.message || 'Não foi possível carregar mensagens. Tente novamente.');
+    }).finally(() => setMessagesLoading(false));
   }, [selectedChatId]);
+
+  const handleRetryLoadMessages = () => {
+    if (!selectedChatId) return;
+    setMessagesError(null);
+    setMessagesLoading(true);
+    getChatMessages(selectedChatId).then(({ messages: msgs, hasMore }) => {
+      setMessages(sortMessages(msgs));
+      setHasMoreMessages(hasMore);
+      setMessagesError(null);
+    }).catch((err) => {
+      setMessagesError(err?.message || 'Não foi possível carregar mensagens. Tente novamente.');
+    }).finally(() => setMessagesLoading(false));
+  };
 
   const handleLoadMoreMessages = async () => {
     if (!selectedChatId || loadingMore || !hasMoreMessages || messages.length === 0) return;
@@ -247,9 +276,9 @@ export default function Dashboard() {
     if (!oldest) return;
     setLoadingMore(true);
     try {
-      const older = await getChatMessages(selectedChatId, 50, oldest);
+      const { messages: older, hasMore } = await getChatMessages(selectedChatId, 50, oldest);
       setMessages((prev) => sortMessages([...older, ...prev]));
-      setHasMoreMessages(older.length >= 50);
+      setHasMoreMessages(hasMore);
     } catch (_) {
       setHasMoreMessages(false);
     } finally {
@@ -570,6 +599,8 @@ export default function Dashboard() {
                 loadingMore={loadingMore}
                 messagesLoading={messagesLoading}
                 uploadProgress={uploadProgress}
+                messagesError={messagesError}
+                onRetryLoadMessages={handleRetryLoadMessages}
               />
             )}
           </div>

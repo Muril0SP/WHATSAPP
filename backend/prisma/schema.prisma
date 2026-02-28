@@ -29,6 +29,7 @@ model Message {
   mediaPath   String?
   mimeType    String?
   timestamp   DateTime
+  ack         Int      @default(0)
   createdAt   DateTime @default(now())
   tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 

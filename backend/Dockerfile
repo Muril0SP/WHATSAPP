@@ -22,4 +22,4 @@ RUN mkdir -p /app/data/sessions /app/data/storage
 
 EXPOSE 3001
 
-CMD ["sh", "-c", "npx prisma db push && node src/index.js"]
+CMD ["sh", "-c", "npx prisma migrate deploy && node src/index.js"]

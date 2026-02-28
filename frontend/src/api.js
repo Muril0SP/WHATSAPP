@@ -150,7 +150,10 @@ export async function getChatMessages(chatId, limit = 50, before) {
   if (before) params.set('before', before);
   const path = `/wa/chats/${encodeURIComponent(chatId)}/messages?${params.toString()}`;
   const data = await api(path);
-  return data.messages || [];
+  return {
+    messages: data.messages || [],
+    hasMore: data.hasMore ?? (data.messages?.length || 0) >= limit,
+  };
 }
 
 export async function searchChatMessages(chatId, q) {
