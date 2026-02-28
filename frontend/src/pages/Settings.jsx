@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { QRCodeSVG } from 'qrcode.react';
 import { io } from 'socket.io-client';
+import { useTheme } from '../contexts/ThemeContext';
 import {
   getWaStatus,
   getWaQr,
@@ -20,12 +21,14 @@ import {
 import './Settings.css';
 
 const TABS = [
+  { id: 'appearance', label: 'Aparência' },
   { id: 'connection', label: 'Conexão' },
   { id: 'profile', label: 'Perfil WhatsApp' },
   { id: 'users', label: 'Usuários' },
 ];
 
 export default function Settings() {
+  const { theme, setTheme } = useTheme();
   const [tab, setTab] = useState('connection');
   const [status, setStatus] = useState('loading');
   const [qr, setQr] = useState(null);
@@ -281,6 +284,23 @@ export default function Settings() {
       </nav>
 
       <main className="settings-main">
+        {tab === 'appearance' && (
+          <section className="settings-card">
+            <h2>Tema</h2>
+            <div className="theme-toggle-row">
+              <span>Tema escuro</span>
+              <label className="theme-switch">
+                <input
+                  type="checkbox"
+                  checked={theme === 'light'}
+                  onChange={(e) => setTheme(e.target.checked ? 'light' : 'dark')}
+                />
+                <span className="theme-slider" />
+              </label>
+              <span>Tema claro</span>
+            </div>
+          </section>
+        )}
         {tab === 'connection' && (
           <section className="settings-card">
             <h2>Conexão WhatsApp</h2>

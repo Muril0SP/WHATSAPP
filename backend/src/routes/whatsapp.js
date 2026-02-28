@@ -13,6 +13,8 @@ import { getSocketIO } from '../websocket/socket.js';
 import { getMediaPath, saveMedia } from '../storage/index.js';
 import { config } from '../config/index.js';
 import { prisma } from '../db.js';
+import { cacheGet, cacheSet, cacheDel } from '../cache/redis.js';
+import { downloadMediaBackground } from '../services/mediaWorker.js';
 
 const require = createRequire(import.meta.url);
 const { MessageMedia } = require('whatsapp-web.js');
@@ -30,7 +32,11 @@ function isAllowedMime(mime) {
 }
 
 function mediaAuth(req, res, next) {
-  const token = req.query.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
+  const token =
+    req.query.token ||
+    (req.headers.authorization?.startsWith('Bearer ')
+      ? req.headers.authorization.slice(7)
+      : null);
   if (!token) return res.status(401).json({ error: 'Não autorizado' });
   try {
     const decoded = jwt.verify(token, config.jwtSecret);
@@ -41,18 +47,18 @@ function mediaAuth(req, res, next) {
   }
 }
 
-router.get('/media', mediaAuth, (req, res, next) => {
+router.get('/media', mediaAuth, (req, res) => {
   const pathParam = req.query.path;
   if (!pathParam) {
     return res.status(400).json({ error: 'path é obrigatório' });
   }
-  const tenantId = req.tenantId;
-  const absolutePath = getMediaPath(tenantId, pathParam);
+  const absolutePath = getMediaPath(req.tenantId, pathParam);
   if (!absolutePath) {
     return res.status(404).json({ error: 'Arquivo não encontrado' });
   }
+  res.setHeader('Cache-Control', 'private, max-age=86400, immutable');
   res.sendFile(absolutePath, (err) => {
-    if (err) res.status(500).send('Erro ao enviar arquivo');
+    if (err && !res.headersSent) res.status(500).send('Erro ao enviar arquivo');
   });
 });
 
@@ -66,14 +72,19 @@ router.get('/profile-pic/:chatId', mediaAuth, async (req, res) => {
   try {
     const url = await client.getProfilePicUrl(chatId);
     if (!url) return res.status(404).json({ error: 'Foto não disponível' });
-    const imageRes = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } });
+    const imageRes = await fetch(url, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+    });
     if (!imageRes.ok) return res.status(404).json({ error: 'Foto não disponível' });
     const contentType = imageRes.headers.get('content-type') || 'image/jpeg';
     const buffer = Buffer.from(await imageRes.arrayBuffer());
     res.setHeader('Content-Type', contentType);
     res.setHeader('Cache-Control', 'private, max-age=3600');
     res.send(buffer);
-  } catch (e) {
+  } catch (_) {
     res.status(404).json({ error: 'Foto não disponível' });
   }
 });
@@ -87,10 +98,7 @@ function emitToTenant(tenantId, event, data) {
 
 router.get('/status', (req, res) => {
   const state = getTenantState(req.tenantId);
-  res.json({
-    status: state.status,
-    hasQr: !!state.qr,
-  });
+  res.json({ status: state.status, hasQr: !!state.qr });
 });
 
 router.get('/qr', (req, res) => {
@@ -109,8 +117,14 @@ router.post('/connect', (req, res) => {
   }
   initializeClient(tenantId, {
     onQr: (tid, qr) => emitToTenant(tid, 'qr', { qr }),
-    onReady: (tid) => emitToTenant(tid, 'ready', {}),
-    onDisconnected: (tid) => emitToTenant(tid, 'disconnected', {}),
+    onReady: (tid) => {
+      cacheDel(`chats:${tid}`);
+      emitToTenant(tid, 'ready', {});
+    },
+    onDisconnected: (tid) => {
+      cacheDel(`chats:${tid}`);
+      emitToTenant(tid, 'disconnected', {});
+    },
     onAuthFailure: (tid) => emitToTenant(tid, 'auth_failure', {}),
     onMessage: (tid, payload) => emitToTenant(tid, 'message', payload),
     onMessageAck: (tid, data) => emitToTenant(tid, 'message_ack', data),
@@ -119,6 +133,7 @@ router.post('/connect', (req, res) => {
 });
 
 router.post('/disconnect', (req, res) => {
+  cacheDel(`chats:${req.tenantId}`);
   destroyClient(req.tenantId);
   res.json({ status: 'disconnected' });
 });
@@ -132,7 +147,7 @@ router.get('/profile', async (req, res) => {
     const info = client.info;
     const id = info.wid?._serialized || info.wid?.id || '';
     const name = info.pushname || info.name || '';
-    const number = (id && id.includes('@')) ? id.split('@')[0] : id;
+    const number = id.includes('@') ? id.split('@')[0] : id;
     res.json({ id, number, name });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Erro ao obter perfil' });
@@ -163,12 +178,17 @@ router.post('/profile-picture', upload.single('file'), async (req, res) => {
   }
   const file = req.file;
   if (!file) return res.status(400).json({ error: 'Envie uma imagem' });
-  const mime = file.mimetype || '';
-  if (!mime.startsWith('image/')) {
-    return res.status(400).json({ error: 'Apenas imagens são permitidas para foto de perfil' });
+  if (!file.mimetype?.startsWith('image/')) {
+    return res
+      .status(400)
+      .json({ error: 'Apenas imagens são permitidas para foto de perfil' });
   }
   try {
-    const media = new MessageMedia(mime, file.buffer.toString('base64'), file.originalname || 'photo');
+    const media = new MessageMedia(
+      file.mimetype,
+      file.buffer.toString('base64'),
+      file.originalname || 'photo'
+    );
     await client.setProfilePicture(media);
     res.json({ success: true });
   } catch (e) {
@@ -176,46 +196,106 @@ router.post('/profile-picture', upload.single('file'), async (req, res) => {
   }
 });
 
+const MEDIA_TYPES = ['image', 'audio', 'video', 'ptt', 'sticker', 'document', 'album'];
+function isMediaType(type) {
+  if (!type) return false;
+  const t = String(type).toLowerCase();
+  return MEDIA_TYPES.some((m) => t === m || t.startsWith(m));
+}
+
+function inferTypeFromMimetype(mimetype) {
+  if (!mimetype) return null;
+  const m = mimetype.toLowerCase().split('/')[0];
+  if (m === 'image') return 'image';
+  if (m === 'audio') return 'audio';
+  if (m === 'video') return 'video';
+  return null;
+}
+
 function normalizeMessage(msg) {
   const id = msg.id?._serialized || msg.id?.id || '';
-  const chatId = msg.fromMe ? (msg.to || msg.from) : (msg.from || msg.to);
+  const chatId = msg.fromMe ? msg.to || msg.from : msg.from || msg.to;
   const fromMe = !!msg.fromMe;
   const body = msg.body || '';
-  const type = msg.type || 'chat';
-  const timestamp = msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString();
-  const hasMedia = !!msg.hasMedia;
+  let type = msg.type || 'chat';
+  if (type === 'chat' && msg.mimetype) {
+    const inferred = inferTypeFromMimetype(msg.mimetype);
+    if (inferred) type = inferred;
+  }
+  const ts = msg.timestamp ? Number(msg.timestamp) * 1000 : Date.now();
+  const timestamp = new Date(ts).toISOString();
+  const hasMedia = !!msg.hasMedia || isMediaType(type) || !!msg.mimetype;
   const ack = msg.ack ?? 0;
-  return { id, chatId, fromMe, body, type, timestamp, hasMedia, ack };
+  return { id, chatId, fromMe, body, type, timestamp, timestampMs: ts, hasMedia, ack };
 }
 
 function normalizeDbMessage(row) {
+  const ts = row.timestamp.getTime();
+  const type = row.type || 'chat';
   return {
     id: row.waMessageId,
     chatId: row.chatId,
     fromMe: row.fromMe,
     body: row.body || '',
-    type: row.type || 'chat',
+    type,
     timestamp: row.timestamp.toISOString(),
-    hasMedia: !!row.mediaPath,
+    timestampMs: ts,
+    hasMedia: !!row.mediaPath || isMediaType(type),
     mediaPath: row.mediaPath || undefined,
+    mimeType: row.mimeType || undefined,
     ack: 0,
   };
 }
 
+// Scroll reduzido: máximo 5 iterações, 200ms cada — apenas para forçar
+// carregamento inicial, sem bloquear por 15 segundos.
+async function scrollChatListBriefly(page) {
+  if (!page) return;
+  try {
+    for (let i = 0; i < 5; i++) {
+      const done = await page
+        .evaluate(() => {
+          const pane =
+            document.getElementById('pane-side') ||
+            document.querySelector('[data-testid="chat-list"]');
+          if (!pane) return true;
+          const before = pane.scrollTop;
+          pane.scrollTop += 600;
+          return pane.scrollTop === before;
+        })
+        .catch(() => true);
+      if (done) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  } catch (_) {}
+}
+
+// ─── GET /chats ──────────────────────────────────────────────────────────────
+
 router.get('/chats', async (req, res) => {
   const client = getClient(req.tenantId);
   const tenantId = req.tenantId;
+  const cacheKey = `chats:${tenantId}`;
+
   if (client?.info) {
+    // Verifica cache Redis primeiro (TTL 30s)
+    const cached = await cacheGet(cacheKey);
+    if (cached) return res.json({ chats: cached });
+
     try {
+      if (client.pupPage) await scrollChatListBriefly(client.pupPage);
       const chats = await client.getChats();
-      const list = await Promise.all(
-        chats.map(async (chat) => {
+      const list = chats
+        .filter((chat) => chat.id?._serialized !== 'status@broadcast')
+        .map((chat) => {
           let lastMessage = null;
           try {
             if (chat.lastMessage) {
               lastMessage = {
-                body: chat.lastMessage.body?.slice(0, 80) || '(mídia)',
-                timestamp: chat.lastMessage.timestamp ? new Date(chat.lastMessage.timestamp * 1000).toISOString() : null,
+                body: (chat.lastMessage.body?.slice(0, 80)) || '(mídia)',
+                timestamp: chat.lastMessage.timestamp
+                  ? new Date(chat.lastMessage.timestamp * 1000).toISOString()
+                  : null,
               };
             }
           } catch (_) {}
@@ -225,18 +305,20 @@ router.get('/chats', async (req, res) => {
             isGroup: chat.isGroup,
             lastMessage,
           };
-        })
+        });
+
+      list.sort((a, b) =>
+        (b.lastMessage?.timestamp || '').localeCompare(a.lastMessage?.timestamp || '')
       );
-      list.sort((a, b) => {
-        const ta = a.lastMessage?.timestamp || '';
-        const tb = b.lastMessage?.timestamp || '';
-        return tb.localeCompare(ta);
-      });
+
+      await cacheSet(cacheKey, list, 30);
       return res.json({ chats: list });
     } catch (e) {
       return res.status(500).json({ error: e.message || 'Erro ao listar chats' });
     }
   }
+
+  // Fallback: banco de dados
   try {
     const messages = await prisma.message.findMany({
       where: { tenantId },
@@ -245,6 +327,7 @@ router.get('/chats', async (req, res) => {
     });
     const chatMap = new Map();
     for (const m of messages) {
+      if (m.chatId === 'status@broadcast') continue;
       if (!chatMap.has(m.chatId)) {
         chatMap.set(m.chatId, {
           id: m.chatId,
@@ -257,88 +340,128 @@ router.get('/chats', async (req, res) => {
         });
       }
     }
-    const list = Array.from(chatMap.values()).sort((a, b) => {
-      const ta = a.lastMessage?.timestamp || '';
-      const tb = b.lastMessage?.timestamp || '';
-      return tb.localeCompare(ta);
-    });
+    const list = Array.from(chatMap.values()).sort((a, b) =>
+      (b.lastMessage?.timestamp || '').localeCompare(a.lastMessage?.timestamp || '')
+    );
     res.json({ chats: list });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Erro ao listar chats' });
   }
 });
 
+// ─── GET /chats/:chatId/search ────────────────────────────────────────────────
+
+router.get('/chats/:chatId/search', async (req, res) => {
+  const tenantId = req.tenantId;
+  const { chatId } = req.params;
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.json({ messages: [] });
+  try {
+    const rows = await prisma.message.findMany({
+      where: {
+        tenantId,
+        chatId,
+        body: {
+          contains: q,
+          mode: 'insensitive',
+        },
+      },
+      orderBy: { timestamp: 'desc' },
+      take: 50,
+    });
+    const list = rows.map((row) => normalizeDbMessage(row));
+    res.json({ messages: list });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Erro ao buscar mensagens' });
+  }
+});
+
+// ─── GET /chats/:chatId/messages ─────────────────────────────────────────────
+// IMPORTANTE: Responde imediatamente sem bloquear para download de mídia.
+// O download ocorre em background via mediaWorker e notifica via Socket.io.
+
 router.get('/chats/:chatId/messages', async (req, res) => {
   const client = getClient(req.tenantId);
   const tenantId = req.tenantId;
-  const { chatId } = req.params;
+  const chatId = decodeURIComponent(req.params.chatId || '');
+
   if (client?.info) {
     try {
       const chat = await client.getChatById(chatId);
-      const messages = await chat.fetchMessages({ limit: 50 });
+      if (!chat) return res.json({ messages: [] });
+
+      let rawMessages = await chat.fetchMessages({ limit: 50 });
+      if (!Array.isArray(rawMessages)) rawMessages = [];
+
       const list = [];
-      for (const msg of messages) {
-        const norm = normalizeMessage(msg);
+      const msgObjects = new Map();
+
+      for (let idx = 0; idx < rawMessages.length; idx++) {
+        const msg = rawMessages[idx];
+        const norm = { ...normalizeMessage(msg), _idx: idx };
+        msgObjects.set(norm.id, msg);
+
         if (norm.hasMedia) {
+          // Verifica se já temos a mídia no banco
           const existing = await prisma.message.findUnique({
             where: { tenantId_waMessageId: { tenantId, waMessageId: norm.id } },
-            select: { mediaPath: true },
+            select: { mediaPath: true, mimeType: true },
           });
+
           if (existing?.mediaPath) {
             norm.mediaPath = existing.mediaPath;
+            if (existing.mimeType) norm.mimeType = existing.mimeType;
           } else {
-            try {
-              const media = await msg.downloadMedia();
-              if (media?.data) {
-                const buffer = Buffer.from(media.data, 'base64');
-                const filename = media.filename || `media.${(media.mimetype || '').split('/')[1] || 'bin'}`;
-                const relativePath = saveMedia(
-                  tenantId,
-                  norm.id.replace(/[^a-zA-Z0-9.-]/g, '_'),
-                  buffer,
-                  media.mimetype || '',
-                  filename
-                );
-                norm.mediaPath = relativePath;
-                await prisma.message.upsert({
-                  where: { tenantId_waMessageId: { tenantId, waMessageId: norm.id } },
-                  create: {
-                    tenantId,
-                    chatId: norm.chatId,
-                    waMessageId: norm.id,
-                    fromMe: norm.fromMe,
-                    body: norm.body || null,
-                    type: norm.type || 'chat',
-                    mediaPath: relativePath,
-                    timestamp: new Date(norm.timestamp),
-                  },
-                  update: { mediaPath: relativePath },
-                });
-              }
-            } catch (e) {
-              console.warn('[whatsapp] download media for message failed:', norm.id, norm.type, e.message);
-            }
+            // Dispara download em background — não bloqueia a resposta
+            const msgObj = msg;
+            downloadMediaBackground(tenantId, norm, msgObj);
           }
         }
+
         list.push(norm);
       }
-      return res.json({ messages: list });
+
+      list.sort((a, b) => {
+        const ta = a.timestampMs ?? new Date(a.timestamp).getTime();
+        const tb = b.timestampMs ?? new Date(b.timestamp).getTime();
+        if (ta !== tb) return ta - tb;
+        const idCmp = String(a.id).localeCompare(String(b.id));
+        if (idCmp !== 0) return idCmp;
+        return (a._idx ?? 0) - (b._idx ?? 0);
+      });
+
+      return res.json({ messages: list.map(({ _idx, ...m }) => m) });
     } catch (e) {
       return res.status(500).json({ error: e.message || 'Erro ao carregar mensagens' });
     }
   }
+
+  // Fallback: banco de dados (offline)
   try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+    const before = req.query.before;
+    const where = { tenantId, chatId };
+    if (before) where.timestamp = { lt: new Date(before) };
+
     const rows = await prisma.message.findMany({
-      where: { tenantId, chatId },
-      orderBy: { timestamp: 'asc' },
-      take: 100,
+      where,
+      orderBy: { timestamp: 'desc' },
+      take: limit,
     });
-    const list = rows.map((row) => normalizeDbMessage(row));
+
+    const list = rows.reverse().map((row) => normalizeDbMessage(row));
+    list.sort((a, b) => {
+      const ta = a.timestampMs ?? new Date(a.timestamp).getTime();
+      const tb = b.timestampMs ?? new Date(b.timestamp).getTime();
+      return ta !== tb ? ta - tb : String(a.id).localeCompare(String(b.id));
+    });
     res.json({ messages: list });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Erro ao carregar mensagens' });
   }
 });
+
+// ─── POST /send ───────────────────────────────────────────────────────────────
 
 router.post('/send', async (req, res) => {
   const client = getClient(req.tenantId);
@@ -351,10 +474,18 @@ router.post('/send', async (req, res) => {
   }
   try {
     const sent = await client.sendMessage(chatId, text);
-    const sentId = sent.id?._serialized || (typeof sent.id === 'string' ? sent.id : sent.id?.id) || '';
+    const sentId =
+      sent.id?._serialized ||
+      (typeof sent.id === 'string' ? sent.id : sent.id?.id) ||
+      '';
     try {
       await prisma.message.upsert({
-        where: { tenantId_waMessageId: { tenantId: req.tenantId, waMessageId: String(sentId) } },
+        where: {
+          tenantId_waMessageId: {
+            tenantId: req.tenantId,
+            waMessageId: String(sentId),
+          },
+        },
         create: {
           tenantId: req.tenantId,
           chatId,
@@ -368,11 +499,14 @@ router.post('/send', async (req, res) => {
         update: {},
       });
     } catch (_) {}
+    cacheDel(`chats:${req.tenantId}`);
     res.json({ id: String(sentId), success: true });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Erro ao enviar' });
   }
 });
+
+// ─── POST /send-media ─────────────────────────────────────────────────────────
 
 router.post('/send-media', upload.single('file'), async (req, res) => {
   const client = getClient(req.tenantId);
@@ -390,26 +524,59 @@ router.post('/send-media', upload.single('file'), async (req, res) => {
     return res.status(400).json({ error: 'Tipo de arquivo não permitido' });
   }
   try {
-    const media = new MessageMedia(mime, file.buffer.toString('base64'), file.originalname || 'file');
-    const sent = await client.sendMessage(chatId, media, { caption: caption || '' });
-    const sentId = sent.id?._serialized || (typeof sent.id === 'string' ? sent.id : sent.id?.id) || '';
+    const media = new MessageMedia(
+      mime,
+      file.buffer.toString('base64'),
+      file.originalname || 'file'
+    );
+    const sent = await client.sendMessage(chatId, media, { caption });
+    const sentId =
+      sent.id?._serialized ||
+      (typeof sent.id === 'string' ? sent.id : sent.id?.id) ||
+      '';
+
+    const msgType = mime.startsWith('image/')
+      ? 'image'
+      : mime.startsWith('video/')
+        ? 'video'
+        : mime.startsWith('audio/')
+          ? 'audio'
+          : 'document';
+
+    const tenantId = req.tenantId;
+
+    // Salva mídia enviada no storage para exibição imediata
+    let savedPath = null;
+    try {
+      const safeId = String(sentId).replace(/[^a-zA-Z0-9.-]/g, '_') || `sent_${Date.now()}`;
+      savedPath = await saveMedia(tenantId, safeId, file.buffer, mime, file.originalname || 'file');
+    } catch (_) {}
+
     try {
       await prisma.message.upsert({
-        where: { tenantId_waMessageId: { tenantId: req.tenantId, waMessageId: String(sentId) } },
+        where: {
+          tenantId_waMessageId: {
+            tenantId,
+            waMessageId: String(sentId),
+          },
+        },
         create: {
-          tenantId: req.tenantId,
+          tenantId,
           chatId,
           waMessageId: String(sentId),
           fromMe: true,
           body: caption || null,
-          type: mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : mime.startsWith('audio/') ? 'audio' : 'chat',
-          mediaPath: null,
+          type: msgType,
+          mediaPath: savedPath,
+          mimeType: mime,
           timestamp: new Date(),
         },
-        update: {},
+        update: { mediaPath: savedPath, mimeType: mime },
       });
     } catch (_) {}
-    res.json({ id: String(sentId), success: true });
+
+    cacheDel(`chats:${req.tenantId}`);
+    res.json({ id: String(sentId), success: true, mediaPath: savedPath });
   } catch (e) {
     res.status(500).json({ error: e.message || 'Erro ao enviar mídia' });
   }

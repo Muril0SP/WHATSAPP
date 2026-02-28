@@ -1,15 +1,272 @@
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap');
 
+:root,
+[data-theme='dark'] {
+  --bg-primary: #0b141a;
+  --bg-secondary: #111b21;
+  --bg-card: #1a242b;
+  --bg-input: #2a3942;
+  --bg-input-focus: #333f47;
+  --bg-bubble-them: #1f2c34;
+  --bg-bubble-me: #005c4b;
+  --text-primary: #e9edef;
+  --text-secondary: #8696a0;
+  --accent: #00a884;
+  --accent-hover: #06cf9c;
+  --border: rgba(42, 57, 66, 0.5);
+}
+
+[data-theme='light'] {
+  --bg-primary: #efeae2;
+  --bg-secondary: #f0f2f5;
+  --bg-card: #fff;
+  --bg-input: #fff;
+  --bg-input-focus: #e9edef;
+  --bg-bubble-them: #fff;
+  --bg-bubble-me: #d9fdd3;
+  --text-primary: #111b21;
+  --text-secondary: #667781;
+  --accent: #00a884;
+  --accent-hover: #06cf9c;
+  --border: rgba(0, 0, 0, 0.08);
+}
+
 * {
   box-sizing: border-box;
 }
 body {
   margin: 0;
   font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
-  background: #0b141a;
-  color: #e9edef;
+  background: var(--bg-primary);
+  color: var(--text-primary);
   min-height: 100vh;
 }
 #root {
   min-height: 100vh;
+}
+
+/* ─── Lightbox ─────────────────────────────────────────── */
+.lightbox-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: lb-fade 0.15s ease;
+}
+@keyframes lb-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.lightbox-img {
+  max-width: 90vw;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 8px 48px rgba(0, 0, 0, 0.6);
+  animation: lb-scale 0.15s ease;
+}
+@keyframes lb-scale {
+  from { transform: scale(0.95); }
+  to   { transform: scale(1); }
+}
+.lightbox-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: rgba(255, 255, 255, 0.12);
+  border: none;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #fff;
+  transition: background 0.15s;
+}
+.lightbox-close:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* ─── Imagem na bolha ──────────────────────────────────── */
+.bubble-image {
+  max-width: 280px;
+  max-height: 320px;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+  object-fit: cover;
+  display: block;
+  transition: opacity 0.2s;
+}
+.bubble-image:hover {
+  opacity: 0.9;
+}
+.media-img-wrapper {
+  position: relative;
+  min-width: 120px;
+  min-height: 80px;
+}
+.media-skeleton {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, rgba(255,255,255,0.04) 25%, rgba(255,255,255,0.09) 50%, rgba(255,255,255,0.04) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s infinite;
+  border-radius: 8px;
+  min-height: 80px;
+}
+@keyframes skeleton-shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+
+/* ─── Vídeo na bolha ───────────────────────────────────── */
+.bubble-video {
+  max-width: 280px;
+  width: 100%;
+  border-radius: 8px;
+  display: block;
+}
+
+/* ─── Caption de mídia ─────────────────────────────────── */
+.bubble-caption {
+  margin: 6px 0 0;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ─── Documento link ───────────────────────────────────── */
+.bubble-doc-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.07);
+  color: inherit;
+  text-decoration: none;
+  font-size: 0.85rem;
+  max-width: 220px;
+  overflow: hidden;
+}
+.bubble-doc-link span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bubble-doc-link:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* ─── Mídia pendente (baixando) ────────────────────────── */
+.media-pending {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  min-width: 160px;
+}
+.media-pending-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(0, 168, 132, 0.3);
+  border-top-color: #00a884;
+  border-radius: 50%;
+  animation: chat-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+/* ─── Audio Player ─────────────────────────────────────── */
+.audio-player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 200px;
+  max-width: 260px;
+  padding: 4px 0;
+}
+.audio-play-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, transform 0.1s;
+}
+.audio-play-btn:hover {
+  background: var(--accent-hover);
+  transform: scale(1.05);
+}
+.audio-track {
+  flex: 1;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+  position: relative;
+  cursor: pointer;
+}
+.audio-track-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.1s linear;
+  pointer-events: none;
+}
+.audio-track-thumb {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 10px;
+  height: 10px;
+  background: var(--accent);
+  border-radius: 50%;
+  pointer-events: none;
+  transition: left 0.1s linear;
+}
+.audio-time {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  min-width: 72px;
+  text-align: right;
+}
+
+/* ─── Upload progress bar ──────────────────────────────── */
+.upload-progress-bar {
+  height: 3px;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.2s linear;
+  margin-top: 4px;
+}
+.upload-progress-wrap {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+
+/* ─── Virtualizer helper ───────────────────────────────── */
+.messages-virtualizer {
+  position: relative;
+  width: 100%;
 }

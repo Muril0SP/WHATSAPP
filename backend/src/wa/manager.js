@@ -1,4 +1,5 @@
 import { createRequire } from 'module';
+import fs from 'fs';
 import path from 'path';
 import { config } from '../config/index.js';
 import { saveMedia } from '../storage/index.js';
@@ -6,6 +7,21 @@ import { prisma } from '../db.js';
 
 const require = createRequire(import.meta.url);
 const { Client, LocalAuth } = require('whatsapp-web.js');
+
+function findChromePath() {
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    return process.env.PUPPETEER_EXECUTABLE_PATH;
+  }
+  const winPaths = [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    process.env.LOCALAPPDATA + '\\Google\\Chrome\\Application\\chrome.exe',
+  ].filter(Boolean);
+  for (const p of winPaths) {
+    if (p && fs.existsSync(p)) return p;
+  }
+  return null;
+}
 
 const RECONNECT_DELAYS = [2000, 5000, 15000, 60000];
 const MAX_RECONNECT_ATTEMPTS = 10;
@@ -19,19 +35,31 @@ function getAuthPath(tenantId) {
 
 function createClient(tenantId, onQr, onReady, onDisconnected, onAuthFailure, onMessage, onMessageAck) {
   const authPath = getAuthPath(tenantId);
+  const headless = process.env.WA_HEADLESS !== 'false';
   const client = new Client({
     authStrategy: new LocalAuth({
       clientId: tenantId,
       dataPath: authPath,
     }),
     puppeteer: {
-      headless: true,
+      headless,
+      executablePath: findChromePath() || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-accelerated-2d-canvas',
         '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--disable-extensions',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-sync',
+        '--disable-translate',
+        '--metrics-recording-only',
+        '--mute-audio',
       ],
     },
   });
@@ -83,12 +111,21 @@ function createClient(tenantId, onQr, onReady, onDisconnected, onAuthFailure, on
   client.on('message', async (msg) => {
     try {
       const chatId = msg.fromMe ? (msg.to || msg.from) : msg.from;
+      if (chatId === 'status@broadcast') return;
       const id = msg.id._serialized || msg.id?.id || String(Date.now());
       const fromMe = !!msg.fromMe;
       const body = msg.body || '';
-      const type = msg.type || 'chat';
-      const timestamp = msg.timestamp ? new Date(msg.timestamp * 1000) : new Date();
-      const hasMedia = !!msg.hasMedia;
+      let type = msg.type || 'chat';
+      if (type === 'chat' && msg.mimetype) {
+        const m = (msg.mimetype || '').toLowerCase().split('/')[0];
+        if (m === 'image') type = 'image';
+        else if (m === 'audio') type = 'audio';
+        else if (m === 'video') type = 'video';
+      }
+      const ts = msg.timestamp ? Number(msg.timestamp) * 1000 : Date.now();
+      const timestamp = new Date(ts);
+      const mediaTypes = ['image', 'audio', 'video', 'ptt', 'sticker', 'document', 'album'];
+      const hasMedia = !!msg.hasMedia || mediaTypes.some((m) => type === m || (type && String(type).toLowerCase().startsWith(m))) || !!msg.mimetype;
 
       const ack = msg.ack ?? 0;
       const payload = {
@@ -98,6 +135,7 @@ function createClient(tenantId, onQr, onReady, onDisconnected, onAuthFailure, on
         body,
         type,
         timestamp: timestamp.toISOString(),
+        timestampMs: ts,
         hasMedia,
         ack,
       };
@@ -108,7 +146,7 @@ function createClient(tenantId, onQr, onReady, onDisconnected, onAuthFailure, on
           if (media && media.data) {
             const buffer = Buffer.from(media.data, 'base64');
             const filename = media.filename || `media.${(media.mimetype || '').split('/')[1] || 'bin'}`;
-            const relativePath = saveMedia(tenantId, id.replace(/[^a-zA-Z0-9.-]/g, '_'), buffer, media.mimetype || '', filename);
+            const relativePath = await saveMedia(tenantId, id.replace(/[^a-zA-Z0-9.-]/g, '_'), buffer, media.mimetype || '', filename);
             payload.mediaPath = relativePath;
             payload.mimeType = media.mimetype;
           }
@@ -203,6 +241,7 @@ export function initializeClient(tenantId, callbacks) {
   const client = getOrCreateClient(tenantId, callbacks);
   if (!client.info) {
     client.initialize().catch((err) => {
+      console.error('[wa manager] initialize failed:', err?.message || err);
       tenantState.set(tenantId, { status: 'error', qr: null });
       callbacks.onAuthFailure?.(tenantId);
     });

@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
+import rateLimit from 'express-rate-limit';
 import { createServer } from 'http';
 import { config } from './config/index.js';
 import { prisma } from './db.js';
@@ -13,7 +15,27 @@ const app = express();
 const server = createServer(app);
 
 app.use(cors({ origin: true }));
-app.use(express.json());
+app.use(compression({
+  level: 6,
+  threshold: 1024,
+  filter: (req, res) => {
+    // Não comprimir arquivos de mídia (já são binários comprimidos)
+    const ct = res.getHeader('Content-Type') || '';
+    if (String(ct).startsWith('image/') || String(ct).startsWith('video/') || String(ct).startsWith('audio/')) {
+      return false;
+    }
+    return compression.filter(req, res);
+  },
+}));
+app.use(express.json({ limit: '2mb' }));
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 500,
+  message: { error: 'Muitas requisições, tente novamente em breve.' },
+  skip: (req) => req.originalUrl?.includes('/wa/profile-pic'),
+});
+app.use('/api', apiLimiter);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/wa', whatsappRoutes);

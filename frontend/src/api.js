@@ -144,8 +144,18 @@ export async function getChats() {
   return data.chats || [];
 }
 
-export async function getChatMessages(chatId) {
-  const data = await api(`/wa/chats/${encodeURIComponent(chatId)}/messages`);
+export async function getChatMessages(chatId, limit = 50, before) {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+  if (before) params.set('before', before);
+  const path = `/wa/chats/${encodeURIComponent(chatId)}/messages?${params.toString()}`;
+  const data = await api(path);
+  return data.messages || [];
+}
+
+export async function searchChatMessages(chatId, q) {
+  if (!q?.trim()) return [];
+  const data = await api(`/wa/chats/${encodeURIComponent(chatId)}/search?q=${encodeURIComponent(q.trim())}`);
   return data.messages || [];
 }
 
@@ -190,4 +200,48 @@ export async function sendMedia(chatId, file, caption = '') {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data;
+}
+
+/**
+ * Envia mídia com callback de progresso de upload (0–100).
+ * @param {string} chatId
+ * @param {File} file
+ * @param {string} caption
+ * @param {(percent: number) => void} onProgress
+ */
+export function sendMediaWithProgress(chatId, file, caption = '', onProgress) {
+  return new Promise((resolve, reject) => {
+    const token = getToken();
+    const form = new FormData();
+    form.append('chatId', chatId);
+    form.append('file', file);
+    if (caption) form.append('caption', caption);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/wa/send-media');
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    });
+
+    xhr.addEventListener('load', () => {
+      try {
+        const data = JSON.parse(xhr.responseText);
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(data);
+        } else {
+          reject(new Error(data.error || xhr.statusText));
+        }
+      } catch {
+        reject(new Error('Erro ao processar resposta'));
+      }
+    });
+
+    xhr.addEventListener('error', () => reject(new Error('Falha na conexão ao enviar mídia')));
+    xhr.addEventListener('abort', () => reject(new Error('Upload cancelado')));
+    xhr.send(form);
+  });
 }

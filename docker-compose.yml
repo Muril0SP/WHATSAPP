@@ -1,20 +1,53 @@
-version: "3.8"
+name: whatsapp-plataforma
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: whatsapp
+      POSTGRES_USER: whatsapp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-whatsapp_secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U whatsapp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     ports:
-      - "3001:3001"
+      - "3002:3001"
     environment:
       - PORT=3001
-      - DATABASE_URL=file:/app/data/dev.sqlite
+      - DATABASE_URL=postgresql://whatsapp:${POSTGRES_PASSWORD:-whatsapp_secret}@postgres:5432/whatsapp
+      - REDIS_URL=redis://redis:6379
       - SESSION_PATH=/app/data/sessions
       - STORAGE_PATH=/app/data/storage
       - JWT_SECRET=${JWT_SECRET:-altere-em-producao}
     volumes:
       - backend_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:
@@ -25,6 +58,9 @@ services:
       - "5173:80"
     depends_on:
       - backend
+    restart: unless-stopped
 
 volumes:
   backend_data:
+  postgres_data:
+  redis_data:
